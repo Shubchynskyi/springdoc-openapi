@@ -1,18 +1,31 @@
-# Builds and tests every pull request.
-name: CI
+name: Manual springdoc verification
 
 on:
-  pull_request:
-    paths-ignore: ['**.md', 'docs/**']
   workflow_dispatch:
+    inputs:
+      source_sha:
+        description: Exact springdoc source commit to test
+        required: true
+        type: string
+      modules:
+        description: Maven modules for a filtered retry; empty runs the full reactor
+        required: false
+        default: ''
+        type: string
+      tests:
+        description: Surefire test selector for a filtered retry; empty runs all tests
+        required: false
+        default: ''
+        type: string
 
-# Supersede in-flight runs for the same ref.
+permissions:
+  contents: read
+
 concurrency:
-  group: ci-${{ github.ref }}
-  cancel-in-progress: true
+  group: manual-springdoc-${{ github.run_id }}
+  cancel-in-progress: false
 
 env:
-  MAVEN_ARGS: -B -V --no-transfer-progress -Dmaven.artifact.threads=16
   MAVEN_OPTS: -Xmx3g
 
 jobs:
@@ -20,9 +33,26 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 25
     steps:
+      - name: Validate source commit
+        shell: bash
+        env:
+          SOURCE_SHA: ${{ inputs.source_sha }}
+        run: '[[ "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]'
+
       - uses: actions/checkout@v4
         with:
+          ref: ${{ inputs.source_sha }}
           fetch-depth: 1
+          persist-credentials: false
+
+      - name: Record tested source
+        shell: bash
+        env:
+          SOURCE_SHA: ${{ inputs.source_sha }}
+        run: |
+          actual_sha="$(git rev-parse HEAD)"
+          test "$actual_sha" = "$SOURCE_SHA"
+          printf 'Tested source: `%s`\n' "$actual_sha" >> "$GITHUB_STEP_SUMMARY"
 
       - uses: actions/setup-java@v4
         with:
@@ -30,14 +60,17 @@ jobs:
           distribution: temurin
           cache: maven
 
-      # frontend-maven-plugin runs npm install for springdoc-openapi-starter-common-mcp.
-      - name: Cache npm
-        uses: actions/cache@v4
-        with:
-          path: ~/.npm
-          key: npm-${{ hashFiles('**/src/main/frontend/package-lock.json') }}
-          restore-keys: npm-
-
-      # -Pci keeps skip.npm=false; -T1C matches the runner's core count.
       - name: Test
-        run: ./mvnw $MAVEN_ARGS -Pci -T1C test
+        shell: bash
+        env:
+          MAVEN_PROJECTS: ${{ inputs.modules }}
+          TEST_SELECTOR: ${{ inputs.tests }}
+        run: |
+          args=(-B -V --no-transfer-progress -Dmaven.artifact.threads=16 -Pci -T1C -DskipPublishing=true)
+          if [[ -n "$MAVEN_PROJECTS" ]]; then
+            args+=(-pl "$MAVEN_PROJECTS" -am)
+          fi
+          if [[ -n "$TEST_SELECTOR" ]]; then
+            args+=("-Dtest=$TEST_SELECTOR" -Dsurefire.failIfNoSpecifiedTests=false)
+          fi
+          ./mvnw "${args[@]}" test
